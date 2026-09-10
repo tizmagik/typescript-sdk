@@ -51,17 +51,10 @@ const ADMIN_SCOPE = 'admin';
 
 // Function to create a new MCP server instance (one per session)
 function createMcpServer(): McpServer {
-    const mcpServer = new McpServer(
-        {
-            name: 'mcp-auth-test-server',
-            version: '1.0.0'
-        },
-        {
-            capabilities: {
-                tools: {}
-            }
-        }
-    );
+    const mcpServer = new McpServer({
+        name: 'mcp-auth-test-server',
+        version: '1.0.0'
+    });
 
     // Simple echo tool for testing authenticated calls
     mcpServer.registerTool(
@@ -72,8 +65,7 @@ function createMcpServer(): McpServer {
                 message: z.string().optional().describe('The message to echo back')
             })
         },
-        async (args: { message?: string }) => {
-            const message = args.message || 'No message provided';
+        async ({ message = 'No message provided' }) => {
             return {
                 content: [{ type: 'text', text: `Echo: ${message}` }]
             };
@@ -102,8 +94,7 @@ function createMcpServer(): McpServer {
                 action: z.string().optional().describe('The admin action to perform')
             })
         },
-        async (args: { action?: string }) => {
-            const action = args.action || 'default-admin-action';
+        async ({ action = 'default-admin-action' }) => {
             return {
                 content: [{ type: 'text', text: `Admin action performed: ${action}` }]
             };
@@ -274,8 +265,8 @@ async function startServer() {
     app.use(
         cors({
             origin: '*',
-            exposedHeaders: ['Mcp-Session-Id'],
-            allowedHeaders: ['Content-Type', 'mcp-session-id', 'last-event-id', 'Authorization']
+            exposedHeaders: ['Mcp-Session-Id', 'WWW-Authenticate'],
+            allowedHeaders: ['Content-Type', 'mcp-session-id', 'last-event-id', 'Authorization', 'mcp-protocol-version']
         })
     );
 
@@ -327,13 +318,17 @@ async function startServer() {
                 await mcpServer.connect(transport);
                 await transport.handleRequest(req, res, req.body);
                 return;
+            } else if (sessionId) {
+                res.status(404).json({
+                    jsonrpc: '2.0',
+                    error: { code: -32_001, message: 'Session not found' },
+                    id: null
+                });
+                return;
             } else {
                 res.status(400).json({
                     jsonrpc: '2.0',
-                    error: {
-                        code: -32_000,
-                        message: 'Invalid or missing session ID'
-                    },
+                    error: { code: -32_000, message: 'Bad Request: Session ID required' },
                     id: null
                 });
                 return;
@@ -359,8 +354,12 @@ async function startServer() {
     app.get('/mcp', bearerAuth, async (req: Request, res: Response) => {
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-        if (!sessionId || !transports[sessionId]) {
-            res.status(400).send('Invalid or missing session ID');
+        if (!sessionId) {
+            res.status(400).send('Missing session ID');
+            return;
+        }
+        if (!transports[sessionId]) {
+            res.status(404).send('Session not found');
             return;
         }
 
@@ -381,8 +380,12 @@ async function startServer() {
     app.delete('/mcp', bearerAuth, async (req: Request, res: Response) => {
         const sessionId = req.headers['mcp-session-id'] as string | undefined;
 
-        if (!sessionId || !transports[sessionId]) {
-            res.status(400).send('Invalid or missing session ID');
+        if (!sessionId) {
+            res.status(400).send('Missing session ID');
+            return;
+        }
+        if (!transports[sessionId]) {
+            res.status(404).send('Session not found');
             return;
         }
 
@@ -400,11 +403,18 @@ async function startServer() {
     });
 
     // Start server
-    app.listen(PORT, () => {
+    const httpServer = app.listen(PORT, () => {
         console.log(`MCP Auth Test Server running at http://localhost:${PORT}/mcp`);
         console.log(`  - PRM endpoint: http://localhost:${PORT}/.well-known/oauth-protected-resource`);
         console.log(`  - Auth server: ${AUTH_SERVER_URL}`);
         console.log(`  - Introspection: ${asMetadata.introspection_endpoint}`);
+    });
+    httpServer.on('error', (error: NodeJS.ErrnoException) => {
+        if (error.code !== 'EADDRINUSE') {
+            throw error;
+        }
+        console.error(`Port ${PORT} is already in use — is a stale auth test server still running?`);
+        process.exit(1);
     });
 }
 
